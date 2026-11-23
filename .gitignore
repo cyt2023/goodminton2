@@ -1,0 +1,16 @@
+# Local data and environments (videos and frames of people stay off GitHub)
+runs/
+.venv-coreml/
+研究方案_*.md
+*.mp4
+*.mov
+*.wav
+
+# Xcode / Python / macOS
+xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+build/
+__pycache__/
+*.pyc
+.DS_Store

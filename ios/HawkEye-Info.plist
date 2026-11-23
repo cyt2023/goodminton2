@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>和另一部手机直接连接，两部手机一起判落点。</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_hawkeye-duo._tcp</string>
+		<string>_hawkeye-duo._udp</string>
+	</array>
+</dict>
+</plist>
