@@ -5,6 +5,17 @@ import CoreML
 import SwiftUI
 import UIKit
 
+/// Recording quality. 4K gives sharper zoomed snapshots and more precise calibration;
+/// 4K 120 needs an iPhone Pro (16 Pro or newer) and fills storage twice as fast.
+enum CaptureQuality: String, CaseIterable, Identifiable {
+    case uhd60, uhd120, hd60
+    var id: String { rawValue }
+    var width: Int32 { self == .hd60 ? 1920 : 3840 }
+    var height: Int32 { self == .hd60 ? 1080 : 2160 }
+    var fps: Double { self == .uhd120 ? 120 : 60 }
+    var label: String { ["uhd60": "4K 60", "uhd120": "4K 120", "hd60": "1080p 60"][rawValue]! }
+}
+
 extension AVCaptureDevice {
     /// Focus and expose once at a point (0...1 in the sensor's landscape coordinates).
     func hawkFocus(at p: CGPoint) {
@@ -44,12 +55,17 @@ extension AVCaptureDevice {
         return "自动曝光"
     }
 
-    /// Back wide camera at 1920x1080 and the given frame rate, auto focus/exposure.
-    func hawkConfigure(fps: Double) -> Bool {
-        let fmt = formats.first { f in
+    func hawkFormat(_ q: CaptureQuality) -> AVCaptureDevice.Format? {
+        formats.first { f in
             let d = CMVideoFormatDescriptionGetDimensions(f.formatDescription)
-            return d.width == 1920 && d.height == 1080 && f.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= fps }
+            return d.width == q.width && d.height == q.height && f.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= q.fps }
         }
+    }
+
+    /// Back wide camera at the given resolution and frame rate, auto focus/exposure.
+    func hawkConfigure(_ q: CaptureQuality) -> Bool {
+        let fmt = hawkFormat(q)
+        let fps = q.fps
         guard (try? lockForConfiguration()) != nil else { return false }
         if let fmt { activeFormat = fmt }
         let dur = CMTime(value: 1, timescale: CMTimeScale(fps))
@@ -99,6 +115,20 @@ final class MatchEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
     private let procQueue = DispatchQueue(label: "match.process", qos: .userInitiated)
     private let lock = NSLock()
     private let ciContext = CIContext()
+    /// No colour management: matches the BGRA frames TrackNet was trained and tested on
+    /// (checked on a recorded video: 0.8 levels mean difference).
+    private let scaler = CIContext(options: [.workingColorSpace: NSNull(), .outputColorSpace: NSNull()])
+
+    /// Scale a frame to w x h BGRA bytes on the GPU.
+    private func render(_ img: CIImage, into buf: inout [UInt8], _ w: Int, _ h: Int, highQuality: Bool) {
+        let sx = Double(w) / img.extent.width, sy = Double(h) / img.extent.height
+        let scaled = highQuality
+            ? img.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: sy, kCIInputAspectRatioKey: sx / sy])
+            : img.transformed(by: CGAffineTransform(scaleX: sx, y: sy))
+        buf.withUnsafeMutableBytes { p in
+            scaler.render(scaled, toBitmap: p.baseAddress!, rowBytes: w * 4, bounds: CGRect(x: 0, y: 0, width: w, height: h), format: .BGRA8, colorSpace: nil)
+        }
+    }
     // Shared between queues, guarded by lock.
     private var latest: CVPixelBuffer?
     private var ring: [(index: Int, bgra: [UInt8])] = []
@@ -125,8 +155,11 @@ final class MatchEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
 
     // MARK: camera
 
-    func configure(fps: Double, store: Store) {
-        self.fps = fps
+    /// Qualities this phone's back camera supports (filled in by configure).
+    @Published var supportedQualities: [CaptureQuality] = [.uhd60, .hd60]
+
+    func configure(_ quality: CaptureQuality, store: Store) {
+        self.fps = quality.fps
         self.store = store
         #if DEBUG
         if let path = ProcessInfo.processInfo.environment["HAWKEYE_LIVE_FILE"] { startFileSource(path); return }
@@ -142,12 +175,15 @@ final class MatchEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
             session.addInput(input)
             if session.outputs.isEmpty {
                 let out = AVCaptureVideoDataOutput()
-                out.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+                // Native YUV: no full-size colour conversion per frame; scaling happens on the GPU.
+                out.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
                 out.alwaysDiscardsLateVideoFrames = true
                 out.setSampleBufferDelegate(self, queue: captureQueue)
                 if session.canAddOutput(out) { session.addOutput(out) }
             }
-            let ok = cam.hawkConfigure(fps: fps)
+            let ok = cam.hawkConfigure(quality)
+            let supported = CaptureQuality.allCases.filter { cam.hawkFormat($0) != nil }
+            DispatchQueue.main.async { self.supportedQualities = supported }
             for out in session.outputs {
                 if let c = out.connection(with: .video) {
                     if c.isVideoStabilizationSupported { c.preferredVideoStabilizationMode = .off }
@@ -157,7 +193,7 @@ final class MatchEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
             session.commitConfiguration()
             device = cam
             if !session.isRunning { session.startRunning() }
-            publish(ok ? "1080p · \(Int(fps)) fps · 防抖已关" : "这台手机不支持 1080p \(Int(fps)) fps，用默认格式")
+            publish(ok ? "\(quality.label) · 防抖已关" : "这台手机不支持 \(quality.label)，用默认格式")
         }
     }
 
@@ -262,11 +298,17 @@ final class MatchEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
                 if (try? data.write(to: dir.appendingPathComponent(name))) != nil { file = name }
             }
             l.snapshotFile = file
+            var zfile: String?
+            if let data = m.zoom, let dir = procQueue.sync(execute: { folder }) {
+                let name = "landing_B_\(l.candidate.contactFrame)_zoom.jpg"
+                if (try? data.write(to: dir.appendingPathComponent(name))) != nil { zfile = name }
+            }
+            l.zoomFile = zfile
             // Put B's landing on this phone's video timeline (its frame numbers are B's own).
             lock.lock(); let t0 = startAbs; lock.unlock()
             l.candidate.contactTime = t - t0
             l.candidate.contactFrame = Int((l.candidate.contactTime * fps).rounded())
-            f.add(.init(landing: l, time: t, side: "B", snapshotFile: file, arrived: DualLink.now())).forEach { appendFinal($0) }
+            f.add(.init(landing: l, time: t, side: "B", snapshotFile: file, arrived: DualLink.now(), zoomFile: zfile)).forEach { appendFinal($0) }
         default: break
         }
     }
@@ -340,18 +382,9 @@ final class MatchEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
         let W = LiveTracker.W, H = LiveTracker.H
         var small = [UInt8](repeating: 0, count: W * H * 4)
         var ringBuf = [UInt8](repeating: 0, count: Self.ringW * Self.ringH * 4)
-        CVPixelBufferLockBaseAddress(pb, .readOnly)
-        var src = vImage_Buffer(data: CVPixelBufferGetBaseAddress(pb), height: vImagePixelCount(CVPixelBufferGetHeight(pb)),
-                                width: vImagePixelCount(CVPixelBufferGetWidth(pb)), rowBytes: CVPixelBufferGetBytesPerRow(pb))
-        small.withUnsafeMutableBytes { p in
-            var d = vImage_Buffer(data: p.baseAddress, height: vImagePixelCount(H), width: vImagePixelCount(W), rowBytes: W * 4)
-            _ = vImageScale_ARGB8888(&src, &d, nil, vImage_Flags(kvImageHighQualityResampling))
-        }
-        ringBuf.withUnsafeMutableBytes { p in
-            var d = vImage_Buffer(data: p.baseAddress, height: vImagePixelCount(Self.ringH), width: vImagePixelCount(Self.ringW), rowBytes: Self.ringW * 4)
-            _ = vImageScale_ARGB8888(&src, &d, nil, vImage_Flags(kvImageNoFlags))
-        }
-        CVPixelBufferUnlockBaseAddress(pb, .readOnly)
+        let src = CIImage(cvPixelBuffer: pb)
+        render(src, into: &small, W, H, highQuality: true)
+        render(src, into: &ringBuf, Self.ringW, Self.ringH, highQuality: false)
 
         lock.lock()
         ring.append((idx, ringBuf))
@@ -392,9 +425,10 @@ final class MatchEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
         guard let cal = calibration, cal.onGround(c.contactPx),
               Court.signedDistance(cal.toCourt(c.contactPx), .doubles).d > -3 else { return }
         var s = Analyzer.Settings(); s.mode = mode
-        let r = Uncertainty.locate(cal, pixel: c.contactPx, cov: Uncertainty.pixelCov(detSigma: s.detSigma, velocity: c.velocityPxPerFrame),
+        let det = s.detSigma(width: Double(frameSize.width))
+        let r = Uncertainty.locate(cal, pixel: c.contactPx, cov: Uncertainty.pixelCov(detSigma: det, velocity: c.velocityPxPerFrame),
                                    mode: mode, contactRadius: s.contactRadius, alpha: s.alpha)
-        var l = Landing(candidate: c, result: r, pixelSigma: s.detSigma, playerCall: nil, notALanding: nil)
+        var l = Landing(candidate: c, result: r, pixelSigma: det, playerCall: nil, notALanding: nil)
         lock.lock()
         let frame = ring.min { abs($0.index - c.contactFrame) < abs($1.index - c.contactFrame) }
         lock.unlock()
@@ -404,8 +438,14 @@ final class MatchEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
                 l.snapshotFile = name
             }
         }
-        lock.lock(); let abs = startAbs + c.contactTime; lock.unlock()
+        // Full-resolution crop of the newest frame: the shuttle usually still lies there.
+        lock.lock(); let latestPB = latest; let abs = startAbs + c.contactTime; lock.unlock()
+        if let pb = latestPB, let folder, let img = renderZoom(pb, cal: cal, landing: l) {
+            let name = "landing_\(c.contactFrame)_zoom.jpg"
+            if let data = img.jpegData(compressionQuality: 0.85), (try? data.write(to: folder.appendingPathComponent(name))) != nil { l.zoomFile = name }
+        }
         let snapData = l.snapshotFile.flatMap { f in folder.flatMap { try? Data(contentsOf: $0.appendingPathComponent(f)) } }
+        let zoomData = l.zoomFile.flatMap { f in folder.flatMap { try? Data(contentsOf: $0.appendingPathComponent(f)) } }
         DispatchQueue.main.async { [self] in
             switch role {
             case .solo:
@@ -418,10 +458,54 @@ final class MatchEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
                 if ProcessInfo.processInfo.environment["HAWKEYE_DUO_NOROTATE"] != nil { sent.result = l.result }
                 #endif
                 sent.snapshotFile = nil
-                link?.send(DuoMessage(kind: .landing, landing: sent, time: link?.toHostClock(abs), snapshot: snapData))
+                sent.zoomFile = nil
+                link?.send(DuoMessage(kind: .landing, landing: sent, time: link?.toHostClock(abs), snapshot: snapData, zoom: zoomData))
             case .host:
-                fusion?.add(.init(landing: l, time: abs, side: "A", snapshotFile: l.snapshotFile, arrived: DualLink.now())).forEach { appendFinal($0) }
+                fusion?.add(.init(landing: l, time: abs, side: "A", snapshotFile: l.snapshotFile, arrived: DualLink.now(), zoomFile: l.zoomFile)).forEach { appendFinal($0) }
             }
+        }
+    }
+
+    /// Full-resolution crop (a quarter of the frame width) around the landing, with the
+    /// boundary, the landing point and its 95% ellipse drawn on it.
+    private func renderZoom(_ pb: CVPixelBuffer, cal: Calibration, landing l: Landing) -> UIImage? {
+        let W = Double(CVPixelBufferGetWidth(pb)), H = Double(CVPixelBufferGetHeight(pb))
+        let cw = (W * 0.25).rounded(), ch = (cw * 9 / 16).rounded()
+        let c = l.candidate.contactPx
+        let x0 = min(max(0, c.x - cw / 2), W - cw), y0 = min(max(0, c.y - ch / 2), H - ch)    // image coords, top-left
+        let ciRect = CGRect(x: x0, y: H - y0 - ch, width: cw, height: ch)                    // Core Image: origin bottom-left
+        guard let cg = ciContext.createCGImage(CIImage(cvPixelBuffer: pb), from: ciRect) else { return nil }
+        func v(_ p: Pt) -> CGPoint { CGPoint(x: p.x - x0, y: p.y - y0) }
+        let fmt = UIGraphicsImageRendererFormat(); fmt.scale = 1
+        return UIGraphicsImageRenderer(size: CGSize(width: cw, height: ch), format: fmt).image { ctx in
+            UIImage(cgImage: cg).draw(at: .zero)
+            let g = ctx.cgContext
+            g.setLineWidth(2)
+            g.setStrokeColor(UIColor.yellow.withAlphaComponent(0.8).cgColor)
+            let b = Court.boundary(mode)
+            let corners = [Pt(b.x0, b.y0), Pt(b.x1, b.y0), Pt(b.x1, b.y1), Pt(b.x0, b.y1), Pt(b.x0, b.y0)]
+            for i in 0..<4 {
+                var started = false
+                for k in 0...200 {
+                    guard let px = cal.toImage(corners[i] + (corners[i + 1] - corners[i]) * (Double(k) / 200)) else { started = false; continue }
+                    if started { g.addLine(to: v(px)) } else { g.move(to: v(px)); started = true }
+                }
+                g.strokePath()
+            }
+            let col: UIColor = l.result.call == .IN ? .green : (l.result.call == .OUT ? .red : .orange)
+            g.setStrokeColor(col.cgColor); g.setLineWidth(3)
+            var started = false
+            for q in Uncertainty.ellipse(centre: l.result.courtXY, cov: l.result.cov, steps: 96) {
+                guard let px = cal.toImage(q) else { started = false; continue }
+                if started { g.addLine(to: v(px)) } else { g.move(to: v(px)); started = true }
+            }
+            g.strokePath()
+            let p = v(c)
+            g.move(to: CGPoint(x: p.x - 18, y: p.y)); g.addLine(to: CGPoint(x: p.x + 18, y: p.y))
+            g.move(to: CGPoint(x: p.x, y: p.y - 18)); g.addLine(to: CGPoint(x: p.x, y: p.y + 18))
+            g.strokePath()
+            let label = String(format: " 原画面放大（落地约 1 秒后）· %@ ", l.result.call.cn) as NSString
+            label.draw(at: CGPoint(x: 10, y: 10), withAttributes: [.font: UIFont.boldSystemFont(ofSize: max(18, cw / 40)), .foregroundColor: UIColor.white, .backgroundColor: col.withAlphaComponent(0.8)])
         }
     }
 
@@ -501,7 +585,7 @@ final class MatchEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSam
         func reader() -> (AVAssetReader, AVAssetReaderTrackOutput)? {
             let asset = AVURLAsset(url: url)
             guard let track = asset.tracks(withMediaType: .video).first, let r = try? AVAssetReader(asset: asset) else { return nil }
-            let o = AVAssetReaderTrackOutput(track: track, outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
+            let o = AVAssetReaderTrackOutput(track: track, outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange])
             r.add(o); r.startReading()
             return (r, o)
         }

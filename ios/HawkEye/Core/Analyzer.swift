@@ -11,6 +11,8 @@ struct Landing: Codable, Identifiable {
     var notALanding: Bool?
     /// Live matches: frame at contact with the overlay drawn, saved in the session folder.
     var snapshotFile: String? = nil
+    /// Full-resolution crop around the shuttle, taken when the landing was confirmed (~1 s after contact).
+    var zoomFile: String? = nil
     /// Two-phone matches: each phone's own estimate (result above is the combination).
     var views: [LandingView]? = nil
 }
@@ -29,9 +31,12 @@ enum Analyzer {
     struct Settings {
         var mode: Mode = .singles
         var alpha = 0.05
-        var detSigma = 6.0            // px: TrackNet gives the shuttle centre, not the cork contact (see README)
+        var detSigma = 6.0            // px at 1280 px width: TrackNet gives the shuttle centre, not the cork contact (see README)
         var contactRadius = 0.013     // m: cork radius, so a touch of the line counts as in
         var maxOutside = 3.0
+        /// TrackNet works on a 512 px wide image, so its position noise in camera pixels grows
+        /// with the frame width (one heatmap pixel is 7.5 px in 4K).
+        func detSigma(width: Double) -> Double { detSigma * width / 1280 }
     }
 
     static func run(track: ShuttleTracker.Track, calibration cal: Calibration, settings s: Settings = Settings()) -> Analysis {
@@ -41,11 +46,11 @@ enum Analyzer {
             guard cal.onGround(c.contactPx) else { rejected += 1; continue }
             let g = cal.toCourt(c.contactPx)
             if Court.signedDistance(g, .doubles).d < -s.maxOutside { rejected += 1; continue }
-            let cov = Uncertainty.pixelCov(detSigma: s.detSigma, velocity: c.velocityPxPerFrame)
+            let cov = Uncertainty.pixelCov(detSigma: s.detSigma(width: track.width), velocity: c.velocityPxPerFrame)
             var cand = c
             if c.contactFrame < track.times.count { cand.contactTime = track.times[c.contactFrame] }
             let r = Uncertainty.locate(cal, pixel: c.contactPx, cov: cov, mode: s.mode, contactRadius: s.contactRadius, alpha: s.alpha)
-            let l = Landing(candidate: cand, result: r, pixelSigma: s.detSigma, playerCall: nil, notALanding: nil)
+            let l = Landing(candidate: cand, result: r, pixelSigma: s.detSigma(width: track.width), playerCall: nil, notALanding: nil)
             if c.isRallyLanding { landings.append(l) } else { nonRally.append(l) }
         }
         return Analysis(landings: landings, nonRally: nonRally, rejected: rejected, fps: track.fps,

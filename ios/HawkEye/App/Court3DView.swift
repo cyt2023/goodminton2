@@ -195,6 +195,7 @@ struct ReplayView: View {
     let mode: Mode
     @State var index: Int
     @State private var overview = false
+    @State private var zoom = true
     @State private var token = 0
     @Environment(\.dismiss) private var dismiss
 
@@ -224,13 +225,17 @@ struct ReplayView: View {
                         // Two phones: each one's snapshot and its own call; the big call is the combination.
                         ForEach(views, id: \.side) { v in
                             ZStack(alignment: .topLeading) {
-                                snapshot(v.snapshotFile)
+                                snapshot(zoom ? (v.zoomFile ?? v.snapshotFile) : v.snapshotFile)
                                 Text("\(v.side) 端：\(v.result.call.cn) · ±\(Int(v.result.distanceSigma * 1000)) mm").font(.caption2.bold())
                                     .padding(4).background(.black.opacity(0.6)).foregroundStyle(.white).padding(4)
                             }
                         }
                     } else {
-                        snapshot(l.snapshotFile)
+                        snapshot(zoom ? (l.zoomFile ?? l.snapshotFile) : l.snapshotFile)
+                    }
+                    if l.zoomFile != nil || (l.views ?? []).contains(where: { $0.zoomFile != nil }) {
+                        Picker("", selection: $zoom) { Text("放大（原画面）").tag(true); Text("整幅（触地那一帧）").tag(false) }
+                            .pickerStyle(.segmented)
                     }
                     Text(String(format: "触地 %.1f s · 离%@ %+.0f ± %.0f mm（正 = 界内）", l.candidate.contactTime, l.result.nearestEdge.cn,
                                 l.result.signedDistance * 1000, l.result.distanceSigma * 1000)).font(.caption)

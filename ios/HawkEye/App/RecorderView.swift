@@ -1,7 +1,7 @@
 import AVFoundation
 import SwiftUI
 
-/// Camera for court recordings: back wide camera, 1080p at 60 (or 30) fps,
+/// Camera for court recordings: back wide camera, 4K 60 by default (4K 120 / 1080p 60),
 /// video stabilisation OFF (it changes the image geometry), tap to focus/expose,
 /// optional lock and fast shutter (less motion blur on the shuttle).
 final class CameraController: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate {
@@ -18,7 +18,9 @@ final class CameraController: NSObject, ObservableObject, AVCaptureFileOutputRec
     private var timer: Timer?
     private var started = Date()
 
-    func configure(fps: Double) {
+    @Published var supportedQualities: [CaptureQuality] = [.uhd60, .hd60]
+
+    func configure(_ quality: CaptureQuality) {
         queue.async { [self] in
             session.beginConfiguration()
             session.sessionPreset = .inputPriority
@@ -32,7 +34,9 @@ final class CameraController: NSObject, ObservableObject, AVCaptureFileOutputRec
                 session.addInput(mi)   // the sound helps align phones and find players' calls later
             }
             if session.outputs.isEmpty, session.canAddOutput(output) { session.addOutput(output) }
-            let ok = cam.hawkConfigure(fps: fps)
+            let ok = cam.hawkConfigure(quality)
+            let supported = CaptureQuality.allCases.filter { cam.hawkFormat($0) != nil }
+            DispatchQueue.main.async { self.supportedQualities = supported }
             if let c = output.connection(with: .video) {
                 if c.isVideoStabilizationSupported { c.preferredVideoStabilizationMode = .off }
                 if c.isVideoRotationAngleSupported(0) { c.videoRotationAngle = 0 }   // landscape, home indicator on the right
@@ -40,7 +44,7 @@ final class CameraController: NSObject, ObservableObject, AVCaptureFileOutputRec
             session.commitConfiguration()
             device = cam
             if !session.isRunning { session.startRunning() }
-            publish(!ok ? "这台手机不支持 1080p \(Int(fps)) fps，用默认格式" : "1080p · \(Int(fps)) fps · 防抖已关")
+            publish(!ok ? "这台手机不支持 \(quality.label)，用默认格式" : "\(quality.label) · 防抖已关")
         }
     }
 
@@ -117,7 +121,7 @@ struct CameraPreview: UIViewRepresentable {
 struct RecorderView: View {
     var onDone: (URL?) -> Void
     @StateObject private var cam = CameraController()
-    @State private var fps = 60.0
+    @State private var quality: CaptureQuality = .uhd60
 
     var body: some View {
         ZStack {
@@ -127,7 +131,7 @@ struct RecorderView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Button { cam.stop(); onDone(nil) } label: { Image(systemName: "xmark.circle.fill").font(.title) }
                         .disabled(cam.isRecording)
-                    Picker("帧率", selection: $fps) { Text("60 fps").tag(60.0); Text("30 fps").tag(30.0) }
+                    Picker("画质", selection: $quality) { ForEach(cam.supportedQualities) { Text($0.label).tag($0) } }
                         .pickerStyle(.segmented).frame(width: 150).disabled(cam.isRecording)
                     Toggle("锁定曝光/对焦", isOn: Binding(get: { cam.locked }, set: { cam.locked = $0; cam.setLocked($0) }))
                         .frame(width: 200)
@@ -158,11 +162,11 @@ struct RecorderView: View {
             cam.onFinished = { url in cam.stop(); onDone(url) }
             AVCaptureDevice.requestAccess(for: .video) { ok in
                 AVCaptureDevice.requestAccess(for: .audio) { _ in
-                    DispatchQueue.main.async { if ok { cam.configure(fps: fps) } else { cam.status = "没有相机权限：设置 › 隐私 › 相机" } }
+                    DispatchQueue.main.async { if ok { cam.configure(quality) } else { cam.status = "没有相机权限：设置 › 隐私 › 相机" } }
                 }
             }
         }
-        .onChange(of: fps) { _, v in cam.configure(fps: v) }
+        .onChange(of: quality) { _, v in cam.configure(v) }
         .statusBarHidden()
     }
 }

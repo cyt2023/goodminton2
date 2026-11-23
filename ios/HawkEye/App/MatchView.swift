@@ -71,7 +71,7 @@ struct MatchView: View {
     @StateObject private var engine = MatchEngine()
     @StateObject private var link = DualLink()
     @State private var role: DuoRole = .solo
-    @State private var fps = 60.0
+    @State private var quality: CaptureQuality = .uhd60
     @State private var mode: Mode = .singles
     @State private var calibrating = false
     @State private var calImage: UIImage?
@@ -138,9 +138,10 @@ struct MatchView: View {
                 if role != .solo { duoStatus }
                 Text(role == .solo ? "1 手机横放在三脚架上，斜对着要判的线，整块场地尽量都在画面里。点画面对焦。"
                                    : "1 两部手机各放在一端底线后面的中间，三脚架尽量高，整块场地都在画面里。点画面对焦。").font(.caption)
-                Picker("帧率", selection: $fps) { Text("60 fps").tag(60.0); Text("30 fps").tag(30.0) }
+                Picker("画质", selection: $quality) { ForEach(engine.supportedQualities) { Text($0.label).tag($0) } }
                     .pickerStyle(.segmented)
-                    .onChange(of: fps) { _, v in engine.configure(fps: v, store: store) }
+                    .onChange(of: quality) { _, v in engine.configure(v, store: store) }
+                if quality == .uhd120 { Text("4K 120 很占空间（约 1 GB/分钟），实时处理也可能跟不上。").font(.caption2).foregroundStyle(.orange) }
                 Toggle("锁定曝光/对焦", isOn: Binding(get: { engine.locked }, set: { engine.setLocked($0) }))
                 Toggle("快门 1/1000", isOn: Binding(get: { engine.fastShutter }, set: { engine.setFastShutter($0) }))
                 Text("2 在画面上点场地线交点（先点几个角）。").font(.caption)
@@ -168,7 +169,7 @@ struct MatchView: View {
                 Text("落点 \(engine.landings.count) 个 · 界内 \(engine.landings.filter { $0.result.call == .IN }.count) · 出界 \(engine.landings.filter { $0.result.call == .OUT }.count)")
                     .font(.caption)
                 if role != .solo { duoStatus }
-                if engine.behindFrames > Int(fps / 4) { Text("处理跟不上（落后 \(engine.behindFrames) 帧），可以换 30 fps").font(.caption2).foregroundStyle(.orange) }
+                if engine.behindFrames > Int(engine.fps / 4) { Text("处理跟不上（落后 \(engine.behindFrames) 帧），可以换低一档画质").font(.caption2).foregroundStyle(.orange) }
                 Button("结束比赛") { engine.stop() }.buttonStyle(.bordered).tint(.red)
             case .finishing:
                 ProgressView("保存中…")
@@ -214,7 +215,7 @@ struct MatchView: View {
         link.onMessage = { m in engine.receive(m) }
         AVCaptureDevice.requestAccess(for: .video) { ok in
             DispatchQueue.main.async {
-                if ok || ProcessInfo.processInfo.environment["HAWKEYE_LIVE_FILE"] != nil { engine.configure(fps: fps, store: store) }
+                if ok || ProcessInfo.processInfo.environment["HAWKEYE_LIVE_FILE"] != nil { engine.configure(quality, store: store) }
                 else { error = "没有相机权限：设置 › 隐私 › 相机" }
                 debugPreset()
             }

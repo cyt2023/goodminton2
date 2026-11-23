@@ -5,6 +5,7 @@ struct LandingView: Codable {
     var side: String               // "A" (this phone / host) or "B" (the other end)
     var result: LandingResult      // in the host's court coordinates
     var snapshotFile: String?
+    var zoomFile: String? = nil
 }
 
 /// Combining the two phones' estimates of the same landing.
@@ -81,6 +82,7 @@ final class LandingFusion {
         var side: String            // "A" or "B"
         var snapshotFile: String?
         var arrived: Double         // host clock when it arrived here
+        var zoomFile: String? = nil
     }
     var window = 0.35, maxDistance = 1.5, wait = 2.0, keepEmitted = 15.0
     let mode: Mode
@@ -124,8 +126,9 @@ final class LandingFusion {
 
     private func single(_ it: Item) -> Landing {
         var l = it.landing
-        l.views = [LandingView(side: it.side, result: it.landing.result, snapshotFile: it.snapshotFile)]
+        l.views = [LandingView(side: it.side, result: it.landing.result, snapshotFile: it.snapshotFile, zoomFile: it.zoomFile)]
         l.snapshotFile = it.snapshotFile
+        l.zoomFile = it.zoomFile
         return l
     }
 
@@ -133,9 +136,10 @@ final class LandingFusion {
         let (a, b) = x.side == "A" ? (x, y) : (y, x)
         var l = a.landing
         l.result = Fusion.combine(a.landing.result, b.landing.result, mode: mode, contactRadius: contactRadius, alpha: alpha)
-        l.views = [LandingView(side: "A", result: a.landing.result, snapshotFile: a.snapshotFile),
-                   LandingView(side: "B", result: b.landing.result, snapshotFile: b.snapshotFile)]
+        l.views = [LandingView(side: "A", result: a.landing.result, snapshotFile: a.snapshotFile, zoomFile: a.zoomFile),
+                   LandingView(side: "B", result: b.landing.result, snapshotFile: b.snapshotFile, zoomFile: b.zoomFile)]
         l.snapshotFile = a.snapshotFile ?? b.snapshotFile
+        l.zoomFile = a.zoomFile ?? b.zoomFile
         return l
     }
 }

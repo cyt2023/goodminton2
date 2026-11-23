@@ -18,6 +18,7 @@ struct DuoMessage: Codable {
     var landing: Landing? = nil                        // in the HOST's court coordinates
     var time: Double? = nil                            // contact time, HOST clock
     var snapshot: Data? = nil                          // JPEG of the guest's contact frame
+    var zoom: Data? = nil                              // JPEG full-resolution crop around the shuttle
 }
 
 /// Pairs two phones directly (Wi-Fi / Bluetooth, no router or internet needed).

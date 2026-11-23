@@ -33,7 +33,7 @@ var settings = Analyzer.Settings(); settings.mode = mode
 func handle(_ dets: [(Int, Pt?, Float)]) {
     for (idx, p, _) in dets { monitor.record(index: idx, point: p, time: monitor.times.count > idx ? monitor.times[idx] : Double(idx) / fps); if p != nil { detected += 1 } }
     for c in monitor.poll() {
-        let r = Uncertainty.locate(cal, pixel: c.contactPx, cov: Uncertainty.pixelCov(detSigma: settings.detSigma, velocity: c.velocityPxPerFrame),
+        let r = Uncertainty.locate(cal, pixel: c.contactPx, cov: Uncertainty.pixelCov(detSigma: settings.detSigma(width: Double(size.width)), velocity: c.velocityPxPerFrame),
                                    mode: mode, contactRadius: settings.contactRadius)
         let lag = Double(i - c.contactFrame) / fps
         print(String(format: "LANDING frame %d (%.2f s) confirmed at frame %d (%.2f s later): %@ P(in)=%.3f court (%.2f, %.2f)%@",
